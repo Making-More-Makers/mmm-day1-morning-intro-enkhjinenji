@@ -1,0 +1,96 @@
+name: AI-Powered Assignment Grading
+# AI驱动的作业自动评分
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'my-maker-profile.md'
+      - 'challenge-reflection.md'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'my-maker-profile.md'
+      - 'challenge-reflection.md'
+
+jobs:
+  grade-assignment:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    
+    steps:
+      - name: Checkout student repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install openai requests PyYAML
+      
+      - name: Run AI grading
+        env:
+          # Support multiple AI providers
+          AI_PROVIDER: ${{ secrets.AI_PROVIDER || 'zhipu' }}  # Default to zhipu
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python .github/scripts/grade.py
+      
+      - name: Post feedback as comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const feedback = fs.readFileSync('feedback.md', 'utf8');
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: feedback
+            });
+      
+      - name: Create issue with feedback
+        if: github.event_name == 'push'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const feedback = fs.readFileSync('feedback.md', 'utf8');
+            
+            // Check if feedback issue already exists
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: ['ai-grading', 'feedback']
+            });
+            
+            if (issues.data.length > 0) {
+              // Update existing issue
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issues.data[0].number,
+                body: feedback
+              });
+            } else {
+              // Create new issue
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: '📝 AI Grading Feedback | AI评分反馈',
+                body: feedback,
+                labels: ['ai-grading', 'feedback']
+              });
+            }
+

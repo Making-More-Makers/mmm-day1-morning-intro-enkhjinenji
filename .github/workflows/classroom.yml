@@ -1,0 +1,215 @@
+# GitHub Classroom Autograding Configuration
+# 这是一个完整的 GitHub Actions workflow 文件
+
+name: Autograding Tests
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'my-maker-profile.md'
+      - 'challenge-reflection.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  ai-grading:
+    name: AI Auto-Grading
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    steps:
+      - name: Checkout student repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install requests PyYAML
+      
+      - name: Check required files
+        run: |
+          if [ ! -f "my-maker-profile.md" ]; then
+            echo "❌ Error: my-maker-profile.md not found"
+            exit 1
+          fi
+          
+          if [ ! -f "challenge-reflection.md" ]; then
+            echo "❌ Error: challenge-reflection.md not found"
+            exit 1
+          fi
+          
+          echo "✅ Required files found"
+      
+      - name: Run AI grading
+        env:
+          AI_PROVIDER: ${{ secrets.AI_PROVIDER || 'zhipu' }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Create grading script inline
+          cat > grade.py << 'PYTHON_SCRIPT'
+          import os
+          import json
+          import requests
+          from pathlib import Path
+          
+          # Configuration
+          AI_PROVIDER = os.environ.get("AI_PROVIDER", "zhipu")
+          
+          if AI_PROVIDER == "zhipu" and os.environ.get("ZHIPU_API_KEY"):
+              ZHIPU_API_KEY = os.environ.get("ZHIPU_API_KEY")
+              MODEL = "glm-4.6"
+              print(f"🤖 Using 智谱AI {MODEL}")
+          elif os.environ.get("OPENAI_API_KEY"):
+              from openai import OpenAI
+              client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+              MODEL = "gpt-4o"
+              print(f"🤖 Using OpenAI {MODEL}")
+          else:
+              print("❌ Error: No AI API key found")
+              exit(1)
+          
+          # Read files
+          def read_file(filepath):
+              try:
+                  if Path(filepath).exists():
+                      with open(filepath, 'r', encoding='utf-8') as f:
+                          return f.read()
+                  return f"❌ File not found: {filepath}"
+              except Exception as e:
+                  return f"❌ Error: {str(e)}"
+          
+          maker_profile = read_file("my-maker-profile.md")
+          challenge_reflection = read_file("challenge-reflection.md")
+          
+          print(f"📝 Files read: {len(maker_profile)} + {len(challenge_reflection)} chars")
+          
+          # Grading prompt
+          prompt = f"""You are a Maker educator grading Day 1 assignment.
+          
+          Evaluate the student's work and provide:
+          - Overall status: ✅ Complete or ⚠️ Needs revision
+          - Section-by-section checklist
+          - What they did well (be specific and encouraging)
+          - Gentle suggestions for improvement
+          - Encouraging closing message
+          
+          Both English and Chinese feedback.
+          
+          Student's my-maker-profile.md:
+          {maker_profile[:3000]}
+          
+          Student's challenge-reflection.md:
+          {challenge_reflection[:3000]}
+          """
+          
+          # Call AI API
+          try:
+              if AI_PROVIDER == "zhipu":
+                  url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+                  headers = {
+                      "Content-Type": "application/json",
+                      "Authorization": f"Bearer {ZHIPU_API_KEY}"
+                  }
+                  payload = {
+                      "model": MODEL,
+                      "messages": [
+                          {"role": "system", "content": "You are a warm Maker educator."},
+                          {"role": "user", "content": prompt}
+                      ],
+                      "thinking": {"type": "enabled"},
+                      "temperature": 0.7,
+                      "max_tokens": 3000
+                  }
+                  response = requests.post(url, headers=headers, json=payload, timeout=120)
+                  response.raise_for_status()
+                  feedback = response.json()["choices"][0]["message"]["content"]
+              else:
+                  response = client.chat.completions.create(
+                      model=MODEL,
+                      messages=[
+                          {"role": "system", "content": "You are a warm Maker educator."},
+                          {"role": "user", "content": prompt}
+                      ],
+                      temperature=0.7,
+                      max_tokens=2000
+                  )
+                  feedback = response.choices[0].message.content
+              
+              print("✅ AI grading completed")
+              
+              # Save feedback
+              full_feedback = f"""# 📝 AI Grading Feedback | AI评分反馈
+              
+              > **Graded by**: AI Teaching Assistant ({MODEL})
+              > **Provider**: {AI_PROVIDER.upper()}
+              
+              {feedback}
+              
+              ---
+              
+              *This is automated AI feedback. Your instructor may provide additional comments.*
+              *这是AI自动反馈。讲师可能会提供额外评论。*
+              """
+              
+              with open("feedback.md", "w", encoding="utf-8") as f:
+                  f.write(full_feedback)
+              
+              print("💾 Feedback saved")
+              
+          except Exception as e:
+              print(f"❌ Grading error: {str(e)}")
+              with open("feedback.md", "w", encoding="utf-8") as f:
+                  f.write(f"# ❌ AI Grading Error\n\n{str(e)}\n\nPlease contact your instructor.")
+              exit(1)
+          
+          PYTHON_SCRIPT
+          
+          python grade.py
+      
+      - name: Post feedback as issue
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const feedback = fs.readFileSync('feedback.md', 'utf8');
+            
+            // Check if feedback issue already exists
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: ['ai-grading', 'feedback']
+            });
+            
+            if (issues.data.length > 0) {
+              // Update existing issue
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issues.data[0].number,
+                body: feedback
+              });
+              console.log(`✅ Updated issue #${issues.data[0].number}`);
+            } else {
+              // Create new issue
+              const issue = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: '📝 AI Grading Feedback | AI评分反馈',
+                body: feedback,
+                labels: ['ai-grading', 'feedback']
+              });
+              console.log(`✅ Created issue #${issue.data.number}`);
+            }
+
